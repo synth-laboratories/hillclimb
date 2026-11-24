@@ -1,0 +1,115 @@
+name: publish-selected-release
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        type: choice
+        options: [stable, nightly]
+        required: true
+      release_tag:
+        type: string
+        required: true
+      manifest_sha256:
+        type: string
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: hillclimb-publication
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.repository == 'synth-laboratories/hillclimb' && github.ref == 'refs/heads/main'
+    environment: pypi
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      GH_REPO: synth-laboratories/hillclimb
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      CHANNEL: ${{ inputs.channel }}
+      MANIFEST_SHA256: ${{ inputs.manifest_sha256 }}
+      UV_CACHE_DIR: ${{ github.workspace }}/.cache/uv
+      UV_PYTHON_DOWNLOADS: never
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12.16'
+      - name: Require actual protected publisher environment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/check_publisher_environment.py
+      - name: Validate selection and install pinned uv
+        run: |
+          python3 scripts/verify_publish.py --request-only --tag "$RELEASE_TAG" --channel "$CHANNEL" --manifest-sha256 "$MANIFEST_SHA256"
+          python3 - <<'PY'
+          import hashlib, io, pathlib, tarfile, urllib.request
+          url = "https://github.com/astral-sh/uv/releases/download/0.13.4/uv-x86_64-unknown-linux-gnu.tar.gz"
+          expected = "2b428396f12572d4429cf210ca234dd599a33b3af0958a4d5ed569d63e3f344f"
+          data = urllib.request.urlopen(url, timeout=60).read(32 * 1024 * 1024 + 1)
+          if hashlib.sha256(data).hexdigest() != expected:
+              raise RuntimeError("uv digest mismatch")
+          target = pathlib.Path("artifacts/tools/uv-0.13.4/uv")
+          target.parent.mkdir(parents=True, exist_ok=True)
+          with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
+              members = [m for m in archive.getmembers() if pathlib.Path(m.name).name == "uv" and m.isfile()]
+              if len(members) != 1:
+                  raise RuntimeError("ambiguous uv archive")
+              target.write_bytes(archive.extractfile(members[0]).read())
+          target.chmod(0o755)
+          PY
+          echo "$PWD/artifacts/tools/uv-0.13.4" >> "$GITHUB_PATH"
+      - name: Fetch selected immutable assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p artifacts/publish
+          gh release download --repo "$GH_REPO" --dir artifacts/publish --pattern publish-manifest.json --pattern cohort.json --pattern 'synth_hillclimb-*.whl' -- "$RELEASE_TAG"
+      - name: Verify wheel, cohort, source and tag
+        id: verify
+        run: |
+          python3 scripts/verify_publish.py --assets artifacts/publish --tag "$RELEASE_TAG" --channel "$CHANNEL" --manifest-sha256 "$MANIFEST_SHA256" --check-git --github-output "$GITHUB_OUTPUT"
+      - name: Sign the selected wheel with the workflow identity
+        env:
+          WHEEL: ${{ steps.verify.outputs.filename }}
+        run: |
+          uv venv --python python3 .venv/publish
+          uv pip install --python .venv/publish/bin/python 'pypi-attestations==0.0.30' 'sigstore>=4.5.1,<5' 'certifi>=2026.10.19'
+          .venv/publish/bin/python - <<'PY'
+          from importlib.metadata import version
+          def ver(name):
+              return tuple(int(part) for part in version(name).split(".")[:3])
+          assert ver("certifi") >= (2026, 10, 19), version("certifi")
+          assert ver("sigstore") >= (4, 5, 1), version("sigstore")
+          PY
+          .venv/publish/bin/python -m pypi_attestations sign "artifacts/publish/$WHEEL"
+          .venv/publish/bin/python scripts/verify_attestation.py --assets artifacts/publish --tag "$RELEASE_TAG" --channel "$CHANNEL" --manifest-sha256 "$MANIFEST_SHA256"
+      - name: Publish the verified bytes with PyPI OIDC
+        env:
+          WHEEL: ${{ steps.verify.outputs.filename }}
+        run: |
+          uv publish --trusted-publishing always --keyring-provider disabled --publish-url https://upload.pypi.org/legacy/ --check-url https://pypi.org/simple/ "artifacts/publish/$WHEEL" "artifacts/publish/$WHEEL.publish.attestation"
+      - name: Verify published registry digest
+        run: |
+          python3 scripts/verify_publish.py --assets artifacts/publish --tag "$RELEASE_TAG" --channel "$CHANNEL" --manifest-sha256 "$MANIFEST_SHA256" --check-git --registry
+      - name: Verify the registry attestation identity
+        run: |
+          .venv/publish/bin/python scripts/verify_attestation.py --assets artifacts/publish --tag "$RELEASE_TAG" --channel "$CHANNEL" --manifest-sha256 "$MANIFEST_SHA256" --registry
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: publication-${{ inputs.release_tag }}
+          path: |
+            artifacts/publish/publish-manifest.json
+            artifacts/publish/cohort.json
+            artifacts/publish/*.publish.attestation
+            artifacts/publish/registry-provenance.json
+          retention-days: 3
