@@ -1,10 +1,13 @@
 /target/
 /.venv/
-/__pycache__/
+**/__pycache__/
 *.py[cod]
 *.egg-info/
 /dist/
 /build/
+/artifacts/
+hillclimb-cli/.build/
+hillclimb-cli/dist/
 .DS_Store
 .env
 .env.*

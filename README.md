@@ -6,6 +6,23 @@ Rust-first prompt, context, skill, and agent harness optimization engine built o
 - **CLI:** `hillclimb`
 - **License:** Apache-2.0
 
+## Install
+
+Install the prebuilt CLI tool with `uv` (no Rust toolchain required):
+
+```sh
+uv tool install --no-build synth-hillclimb
+```
+
+Verify installation and inspect capabilities:
+
+```sh
+hillclimb --help
+hillclimb mcp --help
+```
+
+See [`docs/INSTALL.md`](docs/INSTALL.md) for pinned versions, optional extras (`tui`, `mcp`, `all`), offline wheel installs, and PyPI OIDC provenance verification.
+
 ## Overview
 
 `hillclimb` pairs a formally specified Rust execution kernel with a **Twin-Temper runtime standard**:
